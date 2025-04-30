@@ -6,17 +6,3 @@ Este script automatiza el procesamiento de archivos `.csv` con datos proveniente
 
 ---
 
-## 🛠️ Requisitos
-
-- **Python 3.x**
-- Librerías necesarias:
-  - `pandas`
-  - `glob`
-  - `os`
-  - `re`
-  - `datetime`
-
-> Puedes instalar las dependencias necesarias con:
-
-```bash
-pip install pandas
