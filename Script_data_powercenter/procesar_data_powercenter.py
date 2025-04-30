@@ -5,70 +5,131 @@ import re
 from datetime import datetime, timezone
 
 def extraer_metadatos(primera_linea):
-    """Extrae el nombre del dispositivo y el dataPoint del encabezado completo"""
-    device_match = re.search(r'device="([^"]+)"', primera_linea)
-    datapoint_match = re.search(r'dataPoint="([^"]+)"', primera_linea)
+    try:
+        device_match = re.search(r'device="([^"]+)"', primera_linea)
+        datapoint_match = re.search(r'dataPoint="([^"]+)"', primera_linea)
 
-    device = device_match.group(1) if device_match else "device_unknown"
-    datapoint = datapoint_match.group(1) if datapoint_match else "dataPoint_unknown"
+        device = device_match.group(1) if device_match else "device_unknown"
+        datapoint = datapoint_match.group(1) if datapoint_match else "dataPoint_unknown"
 
-    # Reemplazar caracteres no permitidos en nombres de archivo
-    device = re.sub(r"[^\w\s-]", "", device).replace(" ", "_")
-    datapoint = re.sub(r"[^\w\s-]", "", datapoint).replace(" ", "_")
+        # Sanitizar nombres para archivos
+        device = re.sub(r"[^\w\s-]", "", device).replace(" ", "_").strip()[:50]
+        datapoint = re.sub(r"[^\w\s-]", "", datapoint).replace(" ", "_").strip()[:50]
 
-    return device, datapoint
+        print(f"[INFO] Dispositivo: {device}, DataPoint: {datapoint}")
+        return device, datapoint
+    except Exception as e:
+        print(f"[ERROR] Error extrayendo metadatos: {str(e)}")
+        return "device_unknown", "dataPoint_unknown"
 
 def procesar_archivos(archivos_csv, carpeta_salida="procesados"):
-    if not os.path.exists(carpeta_salida):
-        os.makedirs(carpeta_salida)
+    try:
+        os.makedirs(carpeta_salida, exist_ok=True)
+    except OSError as e:
+        print(f"[ERROR] No se pudo crear carpeta de salida: {str(e)}")
+        return
 
     for archivo in archivos_csv:
-        with open(archivo, "r", encoding="utf-8") as f:
-            primera_linea = f.readline().strip()  # Leer la línea con metadatos
+        print(f"\n{'='*50}\n[PROCESANDO ARCHIVO] {archivo}\n{'='*50}")
 
-        device, datapoint = extraer_metadatos(primera_linea)
-        df = pd.read_csv(archivo, sep=";", skiprows=1)
-
-        # Detectar la columna de valor: puede ser "Valor absoluto" o "Valor"
-        posibles_nombres = ["Valor absoluto", "Valor"]
-        columna_valor = next((col for col in posibles_nombres if col in df.columns), None)
-
-        if not columna_valor:
-            print(f"Columna de valor no encontrada en {archivo}")
+        try:
+            with open(archivo, "r", encoding="utf-8", errors='replace') as f:
+                primera_linea = f.readline().strip()
+        except Exception as e:
+            print(f"[ERROR] No se pudo leer el archivo: {str(e)}")
             continue
 
-        # Filtrar filas sin datos en la columna de valor
-        df = df[df[columna_valor].notna()]
+        try:
+            device, datapoint = extraer_metadatos(primera_linea)
+        except Exception as e:
+            print(f"[ERROR] Fallo en metadatos: {str(e)}")
+            device, datapoint = "unknown", "unknown"
 
-        # Reemplazar comas por puntos y convertir a float
-        df[columna_valor] = df[columna_valor].astype(str).str.replace(",", ".").astype(float)
+        try:
+            df = pd.read_csv(
+                archivo,
+                sep=";",
+                skiprows=1,
+                on_bad_lines='warn',
+                engine='python',
+                encoding='utf-8'
+            )
+        except Exception as e:
+            print(f"[ERROR] Error leyendo CSV: {str(e)}")
+            continue
 
-        # Crear nueva columna convertida
-        df["Convertido"] = df[columna_valor] / 1000
+        # Validar columnas requeridas
+        required_columns = {"Fecha/hora", "Valor absoluto"}
+        if not required_columns.issubset(df.columns):
+            missing = required_columns - set(df.columns)
+            print(f"[ERROR] Columnas faltantes: {', '.join(missing)}")
+            continue
 
-        # Generar nombre del archivo de salida
-        nombre_salida = f"{device}_{datapoint}.txt"
+        # Procesar valores numéricos
+        try:
+            df = df[df["Valor absoluto"].notna()]
+            df["Valor absoluto"] = (
+                df["Valor absoluto"]
+                .astype(str)
+                .str.replace(",", ".", regex=False)
+                .str.strip()
+            )
+            df["Valor absoluto"] = pd.to_numeric(df["Valor absoluto"], errors="coerce")
+            df = df[df["Valor absoluto"].notna()]
+            
+            if df.empty:
+                print("[ERROR] DataFrame vacío después de limpieza")
+                continue
+                
+            df["Convertido"] = df["Valor absoluto"] / 1000 # aca podes cambiar entre que lo vas a dividir
+        except Exception as e:
+            print(f"[ERROR] Procesamiento numérico fallido: {str(e)}")
+            continue
+
+        # Generar archivo de salida
+        nombre_salida = f"{device}_{datapoint}.txt".replace("__", "_")
         ruta_salida = os.path.join(carpeta_salida, nombre_salida)
 
+        registros_exitosos = 0
         with open(ruta_salida, "w", encoding="utf-8") as txt_file:
             txt_file.write(f"name:{nombre_salida}\ttype:Double\n")
 
             for _, row in df.iterrows():
                 try:
-                    # Convertir la fecha al formato UTC con milisegundos
-                    fecha_obj = datetime.strptime(row["Fecha/hora"], "%Y-%m-%dT%H:%M:%S%z")
-                    timestamp = fecha_obj.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                    fecha_str = row["Fecha/hora"]
+                    
+                    # Corregir formato de zona horaria
+                    fecha_str = re.sub(
+                        r"(?<=[+-]\d{2}):(?=\d{2}$)", 
+                        "", 
+                        fecha_str
+                    )
+                    
+                    fecha_obj = datetime.strptime(fecha_str, "%Y-%m-%dT%H:%M:%S%z")
+                    utc_time = fecha_obj.astimezone(timezone.utc)
+                    timestamp = utc_time.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                    valor = round(row["Convertido"], 4)
+                    
+                    txt_file.write(f"{timestamp}\t{valor}\t192\n")
+                    registros_exitosos += 1
+                    
                 except Exception as e:
-                    print(f"Error en la fecha en archivo {archivo}: {e}")
-                    continue
+                    print(f"[ERROR FECHA] {fecha_str} | Error: {str(e)}")
 
-                valor = row["Convertido"]
-                txt_file.write(f"{timestamp}\t{valor:.4f}\t192\n")
+        print(f"\n[RESULTADO] Archivo: {nombre_salida}")
+        print(f"Registros totales: {len(df)}")
+        print(f"Registros exitosos: {registros_exitosos}")
+        print(f"Errores de fecha: {len(df) - registros_exitosos}")
 
-        print(f"Archivo procesado: {ruta_salida}")
-
-# Buscar archivos CSV en la carpeta actual
-archivos_csv = glob.glob("*.csv")
-
-# Procesar los archivos encontrados
-procesar_archivos(archivos_csv)
+if __name__ == "__main__":
+    try:
+        archivos = glob.glob("*.csv")
+        if not archivos:
+            print("[INFO] No se encontraron archivos CSV en el directorio actual")
+        else:
+            procesar_archivos(archivos)
+            print("\nProceso completado. Revise la carpeta 'procesados'")
+    except Exception as e:
+        print(f"[ERROR GLOBAL] {str(e)}")
+    finally:
+        input("\nPresione Enter para salir...")
