@@ -58,8 +58,19 @@ def procesar_archivos(archivos_csv, carpeta_salida="procesados"):
             print(f"[ERROR] Error leyendo CSV: {str(e)}")
             continue
 
+        # Manejar diferentes nombres de columna para valores
+        columna_valor = None
+        for col in ["Valor absoluto", "Valor"]:
+            if col in df.columns:
+                columna_valor = col
+                break
+        
+        if not columna_valor:
+            print("[ERROR] No se encontró columna de valores (Valor absoluto/Valor)")
+            continue
+
         # Validar columnas requeridas
-        required_columns = {"Fecha/hora", "Valor absoluto"}
+        required_columns = {"Fecha/hora", columna_valor}
         if not required_columns.issubset(df.columns):
             missing = required_columns - set(df.columns)
             print(f"[ERROR] Columnas faltantes: {', '.join(missing)}")
@@ -67,21 +78,23 @@ def procesar_archivos(archivos_csv, carpeta_salida="procesados"):
 
         # Procesar valores numéricos
         try:
-            df = df[df["Valor absoluto"].notna()]
-            df["Valor absoluto"] = (
-                df["Valor absoluto"]
+            df = df[df[columna_valor].notna()]
+            df[columna_valor] = (
+                df[columna_valor]
                 .astype(str)
                 .str.replace(",", ".", regex=False)
+                .str.replace(r"[^\d.]", "", regex=True)  # Eliminar caracteres no numéricos
                 .str.strip()
             )
-            df["Valor absoluto"] = pd.to_numeric(df["Valor absoluto"], errors="coerce")
-            df = df[df["Valor absoluto"].notna()]
+            df[columna_valor] = pd.to_numeric(df[columna_valor], errors="coerce")
+            df = df[df[columna_valor].notna()]
             
             if df.empty:
                 print("[ERROR] DataFrame vacío después de limpieza")
                 continue
                 
-            df["Convertido"] = df["Valor absoluto"] / 1000 # aca podes cambiar entre que lo vas a dividir
+            # Conversión a kWh (dividir Wh entre 1000)
+            df["Convertido"] = df[columna_valor] / 1000
         except Exception as e:
             print(f"[ERROR] Procesamiento numérico fallido: {str(e)}")
             continue
@@ -98,19 +111,24 @@ def procesar_archivos(archivos_csv, carpeta_salida="procesados"):
                 try:
                     fecha_str = row["Fecha/hora"]
                     
-                    # Corregir formato de zona horaria
+                    # Corregir formato de zona horaria (remover : en el offset)
                     fecha_str = re.sub(
-                        r"(?<=[+-]\d{2}):(?=\d{2}$)", 
-                        "", 
+                        r"([+-]\d{2}):(\d{2})$", 
+                        r"\1\2", 
                         fecha_str
                     )
                     
+                    # Convertir a datetime con offset
                     fecha_obj = datetime.strptime(fecha_str, "%Y-%m-%dT%H:%M:%S%z")
                     utc_time = fecha_obj.astimezone(timezone.utc)
                     timestamp = utc_time.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                    
+                    # Formatear valor con 4 decimales
                     valor = round(row["Convertido"], 4)
                     
-                    txt_file.write(f"{timestamp}\t{valor}\t192\n")
+                    # Escribir con espacios fijos (7 entre timestamp y valor, 3 entre valor y 192)
+                    linea = f"{timestamp}       {valor:.4f}   192\n"
+                    txt_file.write(linea)
                     registros_exitosos += 1
                     
                 except Exception as e:
